@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and smoke tests
+        run: bash tests/smoke.sh
+      - name: ShellCheck
+        run: shellcheck bin/oc install.sh uninstall.sh tests/smoke.sh

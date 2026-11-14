@@ -1,0 +1,7 @@
+*.tar
+*.tar.gz
+*.log
+.env
+.env.*
+!.env.example
+opencode.jsonc.new

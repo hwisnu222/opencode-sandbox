@@ -1,0 +1,21 @@
+FROM docker.io/library/node:22-slim
+
+# OpenCode version to install. Override with: OC_OPENCODE_VERSION=1.2.3 oc --oc-rebuild
+ARG OPENCODE_VERSION=latest
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git ripgrep ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g "opencode-ai@${OPENCODE_VERSION}" && npm cache clean --force
+
+# Non-root user with UID/GID 1000. Rootless Podman maps the host user to this one
+# (see --userns=keep-id in bin/oc), so files edited by the agent stay owned by the host user.
+RUN userdel -r node 2>/dev/null || true; \
+    groupadd -g 1000 agent && \
+    useradd -m -u 1000 -g 1000 -s /bin/bash agent && \
+    mkdir -p /home/agent/.local/share/opencode /home/agent/.config/opencode && \
+    chown -R agent:agent /home/agent
+
+USER agent
+WORKDIR /workspace

@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+# oc - run OpenCode inside a rootless Podman container.
+#
+# Usage:
+#   cd ~/project && oc [arguments for opencode]
+#
+# oc's own commands (prefixed with --oc- so they never clash with opencode):
+#   oc --oc-help       show this help
+#   oc --oc-version    show the version
+#   oc --oc-doctor     check the environment
+#   oc --oc-rebuild    rebuild the image (pulls the latest OpenCode)
+#   oc --oc-shell      open a bash shell in the same container
+#
+# Environment variables (all optional):
+#   OC_HOME      sandbox data folder (default: ~/.local/share/opencode-sandbox)
+#   OC_PORTS     dev server ports exposed on localhost, space-separated (default: 3000)
+#   OC_MEMORY    container memory limit (default: 2g)
+#   OC_PIDS      process count limit (default: 256)
+#   OC_OPENCODE_VERSION  opencode-ai version used at build time (default: latest)
+set -euo pipefail
+
+OC_VERSION="0.1.0"
+IMAGE_NAME="opencode-sandbox"
+IMAGE="localhost/${IMAGE_NAME}"
+VOLUME="opencode-data"
+OC_HOME="${OC_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-sandbox}"
+CONFIG="$OC_HOME/opencode.jsonc"
+CONTAINERFILE_DIR="$OC_HOME"
+MEMORY="${OC_MEMORY:-2g}"
+PIDS="${OC_PIDS:-256}"
+
+die() { echo "oc: error: $*" >&2; exit 1; }
+warn() { echo "oc: warning: $*" >&2; }
+
+usage() {
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+need_podman() {
+  command -v podman >/dev/null 2>&1 || die "podman is not installed. Run: sudo dnf install podman"
+}
+
+image_exists() {
+  podman image exists "$IMAGE"
+}
+
+build_image() {
+  [ -f "$CONTAINERFILE_DIR/Containerfile" ] || die "Containerfile not found in $CONTAINERFILE_DIR (run install.sh again)"
+  podman build \
+    --build-arg "OPENCODE_VERSION=${OC_OPENCODE_VERSION:-latest}" \
+    -t "$IMAGE_NAME" "$@" "$CONTAINERFILE_DIR"
+}
+
+check_workdir() {
+  if [ "$PWD" = "$HOME" ] || [ "$PWD" = "/" ]; then
+    die "run this from a project folder, not from your home directory or /."
+  fi
+}
+
+# Podman 4.3 or newer is required (for --userns=keep-id:uid=,gid=).
+podman_version_ok() {
+  local v major minor
+  v="$(podman --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p')"
+  [ -n "$v" ] || return 1
+  major="${v%%.*}"
+  minor="${v#*.}"
+  [ "$major" -gt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -ge 3 ]; }
+}
+
+# Check that a file parses as JSONC (comments and trailing commas allowed).
+# Exit status: 0 = valid, 1 = invalid, 2 = python3 is not available.
+jsonc_valid() {
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 -I - "$1" <<'PY' 2>/dev/null
+import json, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+out, i, n, in_str = [], 0, len(src), False
+while i < n:
+    c = src[i]
+    if in_str:
+        out.append(c)
+        if c == "\\":
+            i += 1
+            if i < n:
+                out.append(src[i])
+        elif c == '"':
+            in_str = False
+    elif c == '"':
+        in_str = True
+        out.append(c)
+    elif src.startswith("//", i):
+        while i < n and src[i] != "\n":
+            i += 1
+        continue
+    elif src.startswith("/*", i):
+        j = src.find("*/", i + 2)
+        if j < 0:
+            sys.exit(1)
+        i = j + 2
+        continue
+    elif c in "}]":
+        k = len(out) - 1
+        while k >= 0 and out[k] in " \t\r\n":
+            k -= 1
+        if k >= 0 and out[k] == ",":
+            del out[k]
+        out.append(c)
+    else:
+        out.append(c)
+    i += 1
+try:
+    json.loads("".join(out))
+except ValueError:
+    sys.exit(1)
+PY
+}
+
+# Refuse to start without a readable, syntactically valid config, so a broken
+# file can never silently leave you without your permission rules.
+check_config() {
+  local rc=0
+  [ -f "$CONFIG" ] || die "config not found: $CONFIG (run install.sh)"
+  jsonc_valid "$CONFIG" || rc=$?
+  [ "$rc" -ne 1 ] || die "config is not valid JSONC: $CONFIG (check it with: oc --oc-doctor)"
+}
+
+doctor() {
+  local rc=0
+  ok()   { printf '  [ok]    %s\n' "$*"; }
+  fail() { printf '  [FAIL]  %s\n' "$*"; rc=1; }
+
+  echo "oc $OC_VERSION - environment check"
+  if command -v podman >/dev/null 2>&1; then
+    ok "podman is installed ($(podman --version))"
+    if podman_version_ok; then ok "podman version >= 4.3"; else fail "podman is too old, 4.3 or newer is required"; fi
+  else
+    fail "podman is not installed (sudo dnf install podman)"
+  fi
+
+  if [ -f "$CONFIG" ]; then
+    ok "permission config: $CONFIG"
+    jc=0; jsonc_valid "$CONFIG" || jc=$?
+    case "$jc" in
+      0) ok "config is valid JSONC" ;;
+      2) warn "python3 not found, skipped the config syntax check" ;;
+      *) fail "config is not valid JSONC: $CONFIG" ;;
+    esac
+  else
+    fail "config not found: $CONFIG (run install.sh)"
+  fi
+  if [ -f "$CONTAINERFILE_DIR/Containerfile" ]; then ok "Containerfile present"; else fail "Containerfile missing"; fi
+
+  if command -v podman >/dev/null 2>&1; then
+    if image_exists; then ok "image $IMAGE exists"; else fail "image $IMAGE has not been built (oc --oc-rebuild)"; fi
+  fi
+
+  if [ -r /etc/subuid ] && grep -q "^$(id -un):" /etc/subuid 2>/dev/null; then
+    ok "subuid registered for $(id -un)"
+  else
+    fail "subuid not registered for $(id -un) (see docs/TROUBLESHOOTING.md)"
+  fi
+
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ok "~/.local/bin is on PATH" ;;
+    *) warn "~/.local/bin is not on PATH" ;;
+  esac
+  return "$rc"
+}
+
+# Assemble the common podman run arguments into the RUN_ARGS array.
+build_run_args() {
+  local p gname gmail
+  RUN_ARGS=(
+    run -it --rm
+    --userns=keep-id:uid=1000,gid=1000
+    --cap-drop=ALL --security-opt no-new-privileges
+    --memory "$MEMORY" --memory-swap "$MEMORY" --pids-limit "$PIDS"
+    -v "$PWD":/workspace:z
+    -v "${VOLUME}":/home/agent/.local/share/opencode
+    -v "$CONFIG":/home/agent/.config/opencode/opencode.jsonc:ro,z
+  )
+
+  for p in ${OC_PORTS:-3000}; do
+    case "$p" in
+      ''|*[!0-9]*) die "invalid port: $p" ;;
+    esac
+    [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || die "port out of range: $p"
+    RUN_ARGS+=(-p "127.0.0.1:$p:$p")
+  done
+
+  # Identity only (name/email), never credentials.
+  gname="$(git config --get user.name 2>/dev/null || true)"
+  gmail="$(git config --get user.email 2>/dev/null || true)"
+  if [ -n "$gname" ]; then
+    RUN_ARGS+=(-e "GIT_AUTHOR_NAME=$gname" -e "GIT_COMMITTER_NAME=$gname")
+  fi
+  if [ -n "$gmail" ]; then
+    RUN_ARGS+=(-e "GIT_AUTHOR_EMAIL=$gmail" -e "GIT_COMMITTER_EMAIL=$gmail")
+  fi
+}
+
+main() {
+  case "${1:-}" in
+    --oc-help)    usage; exit 0 ;;
+    --oc-version) echo "oc $OC_VERSION"; exit 0 ;;
+    --oc-doctor)  doctor; exit $? ;;
+    --oc-rebuild)
+      need_podman
+      echo "oc: rebuilding image..." >&2
+      build_image --no-cache
+      exit 0
+      ;;
+    --oc-shell)
+      shift
+      need_podman
+      check_workdir
+      check_config
+      image_exists || { echo "oc: image not found, building..." >&2; build_image; }
+      build_run_args
+      exec podman "${RUN_ARGS[@]}" "$IMAGE" bash "$@"
+      ;;
+  esac
+
+  need_podman
+  podman_version_ok || die "podman is too old, 4.3 or newer is required (check: podman --version)"
+  check_workdir
+  check_config
+
+  if ! image_exists; then
+    echo "oc: image not found, building (this takes a few minutes)..." >&2
+    build_image
+  fi
+
+  build_run_args
+  exec podman "${RUN_ARGS[@]}" "$IMAGE" opencode "$@"
+}
+
+main "$@"
