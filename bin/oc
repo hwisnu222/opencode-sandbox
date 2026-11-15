@@ -29,7 +29,10 @@ CONTAINERFILE_DIR="$OC_HOME"
 MEMORY="${OC_MEMORY:-2g}"
 PIDS="${OC_PIDS:-256}"
 
-die() { echo "oc: error: $*" >&2; exit 1; }
+die() {
+  echo "oc: error: $*" >&2
+  exit 1
+}
 warn() { echo "oc: warning: $*" >&2; }
 
 usage() {
@@ -126,8 +129,11 @@ check_config() {
 
 doctor() {
   local rc=0
-  ok()   { printf '  [ok]    %s\n' "$*"; }
-  fail() { printf '  [FAIL]  %s\n' "$*"; rc=1; }
+  ok() { printf '  [ok]    %s\n' "$*"; }
+  fail() {
+    printf '  [FAIL]  %s\n' "$*"
+    rc=1
+  }
 
   echo "oc $OC_VERSION - environment check"
   if command -v podman >/dev/null 2>&1; then
@@ -139,11 +145,12 @@ doctor() {
 
   if [ -f "$CONFIG" ]; then
     ok "permission config: $CONFIG"
-    jc=0; jsonc_valid "$CONFIG" || jc=$?
+    jc=0
+    jsonc_valid "$CONFIG" || jc=$?
     case "$jc" in
-      0) ok "config is valid JSONC" ;;
-      2) warn "python3 not found, skipped the config syntax check" ;;
-      *) fail "config is not valid JSONC: $CONFIG" ;;
+    0) ok "config is valid JSONC" ;;
+    2) warn "python3 not found, skipped the config syntax check" ;;
+    *) fail "config is not valid JSONC: $CONFIG" ;;
     esac
   else
     fail "config not found: $CONFIG (run install.sh)"
@@ -161,8 +168,8 @@ doctor() {
   fi
 
   case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ok "~/.local/bin is on PATH" ;;
-    *) warn "~/.local/bin is not on PATH" ;;
+  *":$HOME/.local/bin:"*) ok "$HOME/.local/bin is on PATH" ;;
+  *) warn "$HOME/.local/bin is not on PATH" ;;
   esac
   return "$rc"
 }
@@ -170,6 +177,9 @@ doctor() {
 # Assemble the common podman run arguments into the RUN_ARGS array.
 build_run_args() {
   local p gname gmail
+
+  mkdir -p "$OC_HOME/skills"
+
   RUN_ARGS=(
     run -it --rm
     --userns=keep-id:uid=1000,gid=1000
@@ -178,11 +188,12 @@ build_run_args() {
     -v "$PWD":/workspace:z
     -v "${VOLUME}":/home/agent/.local/share/opencode
     -v "$CONFIG":/home/agent/.config/opencode/opencode.jsonc:ro,z
+    -v "$OC_HOME/skills":/home/agent/.config/opencode/skills:ro,z
   )
 
   for p in ${OC_PORTS:-3000}; do
     case "$p" in
-      ''|*[!0-9]*) die "invalid port: $p" ;;
+    '' | *[!0-9]*) die "invalid port: $p" ;;
     esac
     [ "$p" -ge 1 ] && [ "$p" -le 65535 ] || die "port out of range: $p"
     RUN_ARGS+=(-p "127.0.0.1:$p:$p")
@@ -201,24 +212,36 @@ build_run_args() {
 
 main() {
   case "${1:-}" in
-    --oc-help)    usage; exit 0 ;;
-    --oc-version) echo "oc $OC_VERSION"; exit 0 ;;
-    --oc-doctor)  doctor; exit $? ;;
-    --oc-rebuild)
-      need_podman
-      echo "oc: rebuilding image..." >&2
-      build_image --no-cache
-      exit 0
-      ;;
-    --oc-shell)
-      shift
-      need_podman
-      check_workdir
-      check_config
-      image_exists || { echo "oc: image not found, building..." >&2; build_image; }
-      build_run_args
-      exec podman "${RUN_ARGS[@]}" "$IMAGE" bash "$@"
-      ;;
+  --oc-help)
+    usage
+    exit 0
+    ;;
+  --oc-version)
+    echo "oc $OC_VERSION"
+    exit 0
+    ;;
+  --oc-doctor)
+    doctor
+    exit $?
+    ;;
+  --oc-rebuild)
+    need_podman
+    echo "oc: rebuilding image..." >&2
+    build_image --no-cache
+    exit 0
+    ;;
+  --oc-shell)
+    shift
+    need_podman
+    check_workdir
+    check_config
+    image_exists || {
+      echo "oc: image not found, building..." >&2
+      build_image
+    }
+    build_run_args
+    exec podman "${RUN_ARGS[@]}" "$IMAGE" bash "$@"
+    ;;
   esac
 
   need_podman
