@@ -21,7 +21,7 @@ set -euo pipefail
 
 OC_VERSION="0.1.0"
 IMAGE_NAME="opencode-sandbox"
-IMAGE="localhost/${IMAGE_NAME}"
+IMAGE="${OC_IMAGE:-localhost/${IMAGE_NAME}}"
 VOLUME="opencode-data"
 OC_HOME="${OC_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode-sandbox}"
 CONFIG="$OC_HOME/opencode.jsonc"

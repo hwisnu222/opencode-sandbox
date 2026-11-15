@@ -1,0 +1,12 @@
+FROM localhost/opencode-sandbox
+
+USER root
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+  UV_LINK_MODE=copy
+
+RUN uv python install 3.14 --no-cache \
+  && ln -sf "$(uv python find 3.14)" /usr/local/bin/python3 \
+  && ln -sf /usr/local/bin/python3 /usr/local/bin/python
+USER agent
